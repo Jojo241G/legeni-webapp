@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+.pytest_cache/
+reports/
+.env
+.vault_pass
+*.retry
+kubeconfig*
