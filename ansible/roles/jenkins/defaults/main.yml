@@ -1,0 +1,7 @@
+---
+jenkins_image: "legeni/jenkins:lts"
+jenkins_container: jenkins
+jenkins_http_port: 8080
+jenkins_agent_port: 50000
+jenkins_build_dir: /opt/jenkins-build
+jenkins_network: minikube
