@@ -1,0 +1,8 @@
+---
+- name: Provisionner la plateforme CI/CD (Docker, Jenkins, Minikube)
+  hosts: ci
+  become: true
+  roles:
+    - docker
+    - minikube
+    - jenkins
