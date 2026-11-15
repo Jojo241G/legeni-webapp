@@ -1,0 +1,53 @@
+---
+- name: Installer acl (nécessaire pour become vers un utilisateur non root)
+  ansible.builtin.apt:
+    name: acl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Installer minikube
+  ansible.builtin.get_url:
+    url: "https://github.com/kubernetes/minikube/releases/download/{{ minikube_version }}/minikube-linux-amd64"
+    checksum: "sha256:https://github.com/kubernetes/minikube/releases/download/{{ minikube_version }}/minikube-linux-amd64.sha256"
+    dest: /usr/local/bin/minikube
+    mode: "0755"
+
+- name: Installer kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+    checksum: "sha256:https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl.sha256"
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+
+- name: Lire l'état du cluster minikube
+  ansible.builtin.command: minikube status --format '{{ '{{.Host}}' }}'
+  become: true
+  become_user: "{{ minikube_user }}"
+  register: minikube_status
+  changed_when: false
+  failed_when: false
+
+- name: Démarrer minikube (driver docker)
+  ansible.builtin.command: >-
+    minikube start --driver=docker
+    --cpus={{ minikube_cpus }} --memory={{ minikube_memory }}
+  become: true
+  become_user: "{{ minikube_user }}"
+  when: minikube_status.stdout | trim != "Running"
+  changed_when: true
+
+- name: Lister les addons
+  ansible.builtin.command: minikube addons list -o json
+  become: true
+  become_user: "{{ minikube_user }}"
+  register: minikube_addons_list
+  changed_when: false
+
+- name: Activer les addons
+  ansible.builtin.command: "minikube addons enable {{ item }}"
+  become: true
+  become_user: "{{ minikube_user }}"
+  loop: "{{ minikube_addons }}"
+  when: (minikube_addons_list.stdout | from_json)[item].Status is not match("enabled")
+  changed_when: true
