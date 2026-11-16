@@ -16,7 +16,6 @@
         that:
           - target_env in ['staging', 'prod']
           - app_version | length > 0
-          - vault_redis_password is defined
         fail_msg: "Il faut target_env (staging|prod), app_version et vault_redis_password (vault.yml)."
 
     - name: Refuser le tag latest
@@ -30,6 +29,12 @@
         - vars/common.yml
         - "vars/{{ target_env }}.yml"
         - vars/vault.yml
+
+    - name: Vérifier que le secret Redis est chargé depuis le Vault
+      ansible.builtin.assert:
+        that: vault_redis_password is defined
+        fail_msg: "vault_redis_password est absent de vars/vault.yml."
+      no_log: true
 
   tasks:
     - name: Créer le namespace
