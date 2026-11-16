@@ -1,63 +1,117 @@
-// Pipeline de référence du TP 3.5 : tests -> build -> test d'acceptance -> push
+// Lot 4 : intégration continue (qualité en parallèle, build, scan, publication)
 pipeline {
     agent any
 
-    parameters {
-        string(name: 'DOCKERHUB_ID', defaultValue: 'legeni07', description: 'Votre identifiant Docker Hub')
-        booleanParam(name: 'PUSH', defaultValue: true, description: "Pousser l'image sur Docker Hub")
-    }
-
     environment {
-        IMAGE          = "${params.DOCKERHUB_ID}/legeni-webapp"
-        VERSION        = "1.0.${env.BUILD_NUMBER}"
-        TEST_CONTAINER = "webapp-ci-${env.BUILD_NUMBER}"
-        CI_NETWORK     = "ci-net-${env.BUILD_NUMBER}"
+        IMAGE = 'joslath/legeni-webapp'
     }
 
     options {
         timestamps()
-        timeout(time: 20, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
     }
 
     stages {
-        stage('Tests unitaires') {
+        stage('Préparation') {
             steps {
-                // L'étape "test" du Dockerfile lance flake8 + pytest : si un test échoue, le build s'arrête ici
-                sh 'docker build --target test -t legeni-webapp:test .'
+                script {
+                    env.APP_VERSION = readFile('VERSION').trim()
+                    env.TAG = "${env.APP_VERSION}-${env.BUILD_NUMBER}"
+                }
+                echo "Version ${env.TAG} - branche ${env.BRANCH_NAME}"
+            }
+        }
+
+        stage('Qualité') {
+            parallel {
+                stage('Tests et couverture') {
+                    agent {
+                        docker {
+                            image 'python:3.12-slim'
+                            args '-e HOME=/tmp'
+                            reuseNode true
+                        }
+                    }
+                    steps {
+                        sh '''
+                            python -m venv /tmp/venv
+                            /tmp/venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt
+                            mkdir -p reports
+                            /tmp/venv/bin/pytest --junitxml=reports/junit.xml \
+                                --cov=app --cov-report=xml:reports/coverage.xml \
+                                --cov-report=term --cov-fail-under=80
+                        '''
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true, testResults: 'reports/junit.xml'
+                            recordCoverage(tools: [[parser: 'COBERTURA', pattern: 'reports/coverage.xml']])
+                        }
+                    }
+                }
+                stage('Lint Python') {
+                    agent {
+                        docker {
+                            image 'python:3.12-slim'
+                            args '-e HOME=/tmp'
+                            reuseNode true
+                        }
+                    }
+                    steps {
+                        sh '''
+                            python -m venv /tmp/venv
+                            /tmp/venv/bin/pip install -q flake8==7.1.1
+                            mkdir -p reports
+                            /tmp/venv/bin/flake8 --output-file=reports/flake8.txt --tee .
+                        '''
+                    }
+                    post {
+                        always {
+                            recordIssues(tools: [flake8(pattern: 'reports/flake8.txt')])
+                        }
+                    }
+                }
+                stage('Lint Dockerfile') {
+                    steps {
+                        sh 'docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile'
+                    }
+                }
+                stage('Syntaxe Ansible') {
+                    steps {
+                        sh 'cd ansible && ansible-playbook provision.yml deploy.yml --syntax-check'
+                    }
+                }
             }
         }
 
         stage('Build image') {
             steps {
-                sh 'docker build --build-arg APP_VERSION=$VERSION -t $IMAGE:$VERSION -t $IMAGE:latest .'
+                sh 'docker build --build-arg APP_VERSION=$TAG -t $IMAGE:$TAG .'
             }
         }
 
-        stage("Test d'acceptance") {
+        stage('Scan Trivy') {
             steps {
+                // échoue s'il reste une vulnérabilité CRITICAL corrigeable
                 sh '''
-                    docker network create $CI_NETWORK
-                    docker run -d --name $TEST_CONTAINER --network $CI_NETWORK $IMAGE:$VERSION
-                    # On interroge le conteneur depuis un conteneur curl placé sur le même réseau
-                    docker run --rm --network $CI_NETWORK curlimages/curl:8.11.1 \
-                        -sf --retry 10 --retry-connrefused --retry-delay 1 http://$TEST_CONTAINER:5000/health
-                    docker run --rm --network $CI_NETWORK curlimages/curl:8.11.1 \
-                        -sf http://$TEST_CONTAINER:5000/ | grep -q "Version $VERSION"
+                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy_cache:/root/.cache \
+                        aquasec/trivy:0.57.1 image --timeout 15m --scanners vuln \
+                        --severity CRITICAL --ignore-unfixed --exit-code 1 $IMAGE:$TAG
                 '''
             }
         }
 
-        stage('Push Docker Hub') {
-            when { expression { params.PUSH } }
+        stage('Push registre') {
+            when { branch 'main' }
             steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub',
+                withCredentials([usernamePassword(credentialsId: 'registry-credentials',
                                                   usernameVariable: 'DH_USER',
                                                   passwordVariable: 'DH_TOKEN')]) {
                     sh '''
                         echo "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin
-                        docker push $IMAGE:$VERSION
-                        docker push $IMAGE:latest
+                        docker push $IMAGE:$TAG
+                        docker logout
                     '''
                 }
             }
@@ -66,13 +120,10 @@ pipeline {
 
     post {
         always {
-            sh 'docker rm -f $TEST_CONTAINER || true; docker network rm $CI_NETWORK || true'
+            sh 'docker rmi $IMAGE:$TAG || true'
         }
-        success {
-            echo "Image ${IMAGE}:${VERSION} construite et validée"
-        }
-        failure {
-            echo "Échec du pipeline : consultez la console de l'étape en rouge"
+        cleanup {
+            cleanWs()
         }
     }
 }
